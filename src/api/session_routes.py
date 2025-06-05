@@ -158,7 +158,7 @@ async def get_agent_messages(
 
     processed_events = []
     for event in events:
-        event_dict = event.dict()
+        event_dict = event.model_dump()
 
         def process_dict(d):
             if isinstance(d, dict):

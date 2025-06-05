@@ -458,7 +458,7 @@ async def run_agent_stream(
 
                     async for event in events_async:
                         try:
-                            event_dict = event.dict()
+                            event_dict = event.model_dump()
                             event_dict = convert_sets(event_dict)
 
                             if "content" in event_dict and event_dict["content"]:

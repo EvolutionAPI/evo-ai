@@ -67,15 +67,39 @@ class AgentBuilder:
         if agent_tools_ids and isinstance(agent_tools_ids, list):
             for agent_tool_id in agent_tools_ids:
                 sub_agent = get_agent(self.db, agent_tool_id)
-                llm_agent, _ = await self.build_llm_agent(sub_agent)
-                if llm_agent:
-                    agent_tools.append(AgentTool(agent=llm_agent))
+                if sub_agent:
+                    # Verificar se o sub_agent é do tipo LLM antes de criar LlmAgent
+                    if sub_agent.type == "llm":
+                        llm_agent, _ = await self.build_llm_agent(sub_agent)
+                        if llm_agent:
+                            agent_tools.append(AgentTool(agent=llm_agent))
+                    else:
+                        logger.warning(f"Agent tool {agent_tool_id} is not of type 'llm', skipping")
+                else:
+                    logger.warning(f"Agent tool {agent_tool_id} not found")
         return agent_tools
+
+    def _validate_llm_agent_model(self, agent) -> None:
+        """Validate that LLM agent has a proper model configuration."""
+        if not hasattr(agent, 'model') or not agent.model:
+            logger.error(f"LLM agent {agent.name} does not have a model configured")
+            raise ValueError(f"LLM agent {agent.name} requires a model configuration")
+        
+        if isinstance(agent.model, str) and agent.model.strip() == "":
+            logger.error(f"LLM agent {agent.name} has an empty model string")
+            raise ValueError(f"LLM agent {agent.name} has an empty model configuration")
+        
+        logger.info(f"Model validation passed for agent {agent.name}: {agent.model}")
 
     async def _create_llm_agent(
         self, agent, enabled_tools: List[str] = []
     ) -> Tuple[LlmAgent, Optional[AsyncExitStack]]:
         """Create an LLM agent from the agent data."""
+        
+        self._validate_llm_agent_model(agent)
+        
+        logger.info(f"Creating LLM agent: {agent.name} with model: {agent.model}")
+        
         # Get custom tools from the configuration
         custom_tools = []
         custom_tools = self.custom_tool_builder.build_tools(agent.config)
@@ -110,7 +134,7 @@ class AgentBuilder:
             current_day_of_week=current_day_of_week,
             current_date_iso=current_date_iso,
             current_time=current_time,
-        )
+        ) if agent.instruction else ""
 
         # add role on beginning of the prompt
         if agent.role:
@@ -170,21 +194,27 @@ class AgentBuilder:
                     f"Agent {agent.name} does not have a configured API key"
                 )
 
-        return (
-            LlmAgent(
+        if not agent.model or (isinstance(agent.model, str) and agent.model.strip() == ""):
+            raise ValueError(f"Cannot create LiteLlm with empty model for agent {agent.name}")
+
+        try:
+            llm_agent = LlmAgent(
                 name=agent.name,
                 model=LiteLlm(model=agent.model, api_key=api_key),
                 instruction=formatted_prompt,
                 description=agent.description,
                 tools=all_tools,
-            ),
-            mcp_exit_stack,
-        )
+            )
+            logger.info(f"LLM agent created successfully: {agent.name}")
+            return llm_agent, mcp_exit_stack
+        except Exception as e:
+            logger.error(f"Error creating LLM agent {agent.name}: {str(e)}")
+            raise ValueError(f"Error creating LLM agent {agent.name}: {str(e)}")
 
     async def _get_sub_agents(
         self, sub_agent_ids: List[str]
-    ) -> List[Tuple[LlmAgent, Optional[AsyncExitStack]]]:
-        """Get and create LLM sub-agents."""
+    ) -> List[Tuple[BaseAgent, Optional[AsyncExitStack]]]:
+        """Get and create sub-agents with proper type validation."""
         sub_agents = []
         for sub_agent_id in sub_agent_ids:
             sub_agent_id_str = str(sub_agent_id)
@@ -197,39 +227,50 @@ class AgentBuilder:
 
             logger.info(f"Sub-agent found: {agent.name} (type: {agent.type})")
 
-            if agent.type == "llm":
-                sub_agent, exit_stack = await self._create_llm_agent(agent)
-            elif agent.type == "a2a":
-                sub_agent, exit_stack = await self.build_a2a_agent(agent)
-            elif agent.type == "workflow":
-                sub_agent, exit_stack = await self.build_workflow_agent(agent)
-            elif agent.type == "task":
-                sub_agent, exit_stack = await self.build_task_agent(agent)
-            elif agent.type == "sequential":
-                sub_agent, exit_stack = await self.build_composite_agent(agent)
-            elif agent.type == "parallel":
-                sub_agent, exit_stack = await self.build_composite_agent(agent)
-            elif agent.type == "loop":
-                sub_agent, exit_stack = await self.build_composite_agent(agent)
-            else:
-                raise ValueError(f"Invalid agent type: {agent.type}")
+            try:
+                if agent.type == "llm":
+                    # Verificar se tem modelo antes de criar
+                    if not agent.model or (isinstance(agent.model, str) and agent.model.strip() == ""):
+                        logger.error(f"LLM sub-agent {agent.name} does not have a model configured")
+                        raise ValueError(f"LLM sub-agent {agent.name} requires a model configuration")
+                    sub_agent, exit_stack = await self._create_llm_agent(agent)
+                elif agent.type == "a2a":
+                    sub_agent, exit_stack = await self.build_a2a_agent(agent)
+                elif agent.type == "workflow":
+                    # Workflow agents não precisam de modelo
+                    sub_agent, exit_stack = await self.build_workflow_agent(agent)
+                elif agent.type == "task":
+                    sub_agent, exit_stack = await self.build_task_agent(agent)
+                elif agent.type == "sequential":
+                    sub_agent, exit_stack = await self.build_composite_agent(agent)
+                elif agent.type == "parallel":
+                    sub_agent, exit_stack = await self.build_composite_agent(agent)
+                elif agent.type == "loop":
+                    sub_agent, exit_stack = await self.build_composite_agent(agent)
+                else:
+                    raise ValueError(f"Invalid agent type: {agent.type}")
 
-            sub_agents.append((sub_agent, exit_stack))
-            logger.info(f"Sub-agent added: {agent.name}")
+                sub_agents.append((sub_agent, exit_stack))
+                logger.info(f"Sub-agent added: {agent.name}")
+                
+            except Exception as e:
+                logger.error(f"Error creating sub-agent {agent.name}: {str(e)}")
+                raise ValueError(f"Error creating sub-agent {agent.name}: {str(e)}")
 
         logger.info(f"Sub-agents created: {len(sub_agents)}")
-        logger.info(f"Sub-agents: {str(sub_agents)}")
-
         return sub_agents
 
     async def build_llm_agent(
         self, root_agent, enabled_tools: List[str] = []
     ) -> Tuple[LlmAgent, Optional[AsyncExitStack]]:
         """Build an LLM agent with its sub-agents."""
-        logger.info("Creating LLM agent")
+        logger.info(f"Creating LLM agent: {root_agent.name}")
+
+        if root_agent.type != "llm":
+            raise ValueError(f"Expected LLM agent, got {root_agent.type}")
 
         sub_agents = []
-        if root_agent.config.get("sub_agents"):
+        if root_agent.config and root_agent.config.get("sub_agents"):
             sub_agents_with_stacks = await self._get_sub_agents(
                 root_agent.config.get("sub_agents")
             )
@@ -241,20 +282,21 @@ class AgentBuilder:
         if sub_agents:
             root_llm_agent.sub_agents = sub_agents
 
+        logger.info(f"LLM agent built successfully: {root_agent.name}")
         return root_llm_agent, exit_stack
 
     async def build_a2a_agent(
         self, root_agent
-    ) -> Tuple[BaseAgent, Optional[AsyncExitStack]]:
+    ) -> Tuple[A2ACustomAgent, Optional[AsyncExitStack]]:
         """Build an A2A agent with its sub-agents."""
-        logger.info(f"Creating A2A agent from {root_agent.agent_card_url}")
+        logger.info(f"Creating A2A agent from {root_agent.name}")
 
         if not root_agent.agent_card_url:
             raise ValueError("agent_card_url is required for a2a agents")
 
         try:
             sub_agents = []
-            if root_agent.config.get("sub_agents"):
+            if root_agent.config and root_agent.config.get("sub_agents"):
                 sub_agents_with_stacks = await self._get_sub_agents(
                     root_agent.config.get("sub_agents")
                 )
@@ -288,6 +330,9 @@ class AgentBuilder:
         """Build a workflow agent with its sub-agents."""
         logger.info(f"Creating Workflow agent from {root_agent.name}")
 
+        if root_agent.type != "workflow":
+            raise ValueError(f"Expected workflow agent, got {root_agent.type}")
+
         agent_config = root_agent.config or {}
 
         if not agent_config.get("workflow"):
@@ -295,7 +340,7 @@ class AgentBuilder:
 
         try:
             sub_agents = []
-            if root_agent.config.get("sub_agents"):
+            if root_agent.config and root_agent.config.get("sub_agents"):
                 sub_agents_with_stacks = await self._get_sub_agents(
                     root_agent.config.get("sub_agents")
                 )
@@ -304,15 +349,20 @@ class AgentBuilder:
             config = root_agent.config or {}
             timeout = config.get("timeout", 300)
 
-            workflow_agent = WorkflowAgent(
-                name=root_agent.name,
-                flow_json=agent_config.get("workflow"),
-                timeout=timeout,
-                description=root_agent.description
-                or f"Workflow Agent for {root_agent.name}",
-                sub_agents=sub_agents,
-                db=self.db,
-            )
+            kwargs = {
+                "name": root_agent.name,
+                "flow_json": agent_config.get("workflow"),
+                "timeout": timeout,
+                "description": root_agent.description or f"Workflow Agent for {root_agent.name}",
+                "sub_agents": sub_agents,
+                "db": self.db,
+            }
+            
+            # Se o root_agent tiver modelo, não passá-lo para o WorkflowAgent
+            if hasattr(root_agent, 'model') and root_agent.model:
+                logger.warning(f"Workflow agent {root_agent.name} has model '{root_agent.model}' configured, but workflow agents should not have models. Ignoring model.")
+
+            workflow_agent = WorkflowAgent(**kwargs)
 
             logger.info(f"Workflow agent created successfully: {root_agent.name}")
 
@@ -328,6 +378,9 @@ class AgentBuilder:
         """Build a task agent with its sub-agents."""
         logger.info(f"Creating Task agent: {root_agent.name}")
 
+        if root_agent.type != "task":
+            raise ValueError(f"Expected task agent, got {root_agent.type}")
+
         agent_config = root_agent.config or {}
 
         if not agent_config.get("tasks"):
@@ -336,7 +389,7 @@ class AgentBuilder:
         try:
             # Get sub-agents if there are any
             sub_agents = []
-            if root_agent.config.get("sub_agents"):
+            if root_agent.config and root_agent.config.get("sub_agents"):
                 sub_agents_with_stacks = await self._get_sub_agents(
                     root_agent.config.get("sub_agents")
                 )
@@ -380,7 +433,11 @@ class AgentBuilder:
             f"Processing sub-agents for agent {root_agent.type} (ID: {root_agent.id}, Name: {root_agent.name})"
         )
 
-        if not root_agent.config.get("sub_agents"):
+        valid_composite_types = ["sequential", "parallel", "loop"]
+        if root_agent.type not in valid_composite_types:
+            raise ValueError(f"Expected composite agent type ({valid_composite_types}), got {root_agent.type}")
+
+        if not root_agent.config or not root_agent.config.get("sub_agents"):
             logger.error(
                 f"Sub_agents configuration not found or empty for agent {root_agent.name}"
             )
@@ -401,39 +458,51 @@ class AgentBuilder:
         sub_agents = [agent for agent, _ in sub_agents_with_stacks]
         logger.info(f"Extracted sub-agents: {[agent.name for agent in sub_agents]}")
 
-        if root_agent.type == "sequential":
-            logger.info(f"Creating SequentialAgent with {len(sub_agents)} sub-agents")
-            return (
-                SequentialAgent(
-                    name=root_agent.name,
-                    sub_agents=sub_agents,
-                    description=root_agent.config.get("description", ""),
-                ),
-                None,
-            )
-        elif root_agent.type == "parallel":
-            logger.info(f"Creating ParallelAgent with {len(sub_agents)} sub-agents")
-            return (
-                ParallelAgent(
-                    name=root_agent.name,
-                    sub_agents=sub_agents,
-                    description=root_agent.config.get("description", ""),
-                ),
-                None,
-            )
-        elif root_agent.type == "loop":
-            logger.info(f"Creating LoopAgent with {len(sub_agents)} sub-agents")
-            return (
-                LoopAgent(
-                    name=root_agent.name,
-                    sub_agents=sub_agents,
-                    description=root_agent.config.get("description", ""),
-                    max_iterations=root_agent.config.get("max_iterations", 5),
-                ),
-                None,
-            )
-        else:
-            raise ValueError(f"Invalid agent type: {root_agent.type}")
+        if not sub_agents:
+            raise ValueError(f"No valid sub-agents found for {root_agent.type} agent {root_agent.name}")
+
+        try:
+            if root_agent.type == "sequential":
+                logger.info(f"Creating SequentialAgent with {len(sub_agents)} sub-agents")
+                return (
+                    SequentialAgent(
+                        name=root_agent.name,
+                        sub_agents=sub_agents,
+                        description=root_agent.description or root_agent.config.get("description", ""),
+                    ),
+                    None,
+                )
+            elif root_agent.type == "parallel":
+                logger.info(f"Creating ParallelAgent with {len(sub_agents)} sub-agents")
+                return (
+                    ParallelAgent(
+                        name=root_agent.name,
+                        sub_agents=sub_agents,
+                        description=root_agent.description or root_agent.config.get("description", ""),
+                    ),
+                    None,
+                )
+            elif root_agent.type == "loop":
+                logger.info(f"Creating LoopAgent with {len(sub_agents)} sub-agents")
+                max_iterations = root_agent.config.get("max_iterations", 5)
+                if max_iterations <= 0:
+                    logger.warning(f"Invalid max_iterations ({max_iterations}) for LoopAgent, using default 5")
+                    max_iterations = 5
+                return (
+                    LoopAgent(
+                        name=root_agent.name,
+                        sub_agents=sub_agents,
+                        description=root_agent.description or root_agent.config.get("description", ""),
+                        max_iterations=max_iterations,
+                    ),
+                    None,
+                )
+            else:
+                raise ValueError(f"Invalid composite agent type: {root_agent.type}")
+                
+        except Exception as e:
+            logger.error(f"Error creating {root_agent.type} agent {root_agent.name}: {str(e)}")
+            raise ValueError(f"Error creating {root_agent.type} agent {root_agent.name}: {str(e)}")
 
     async def build_agent(self, root_agent, enabled_tools: List[str] = []) -> Tuple[
         LlmAgent
@@ -446,13 +515,29 @@ class AgentBuilder:
         Optional[AsyncExitStack],
     ]:
         """Build the appropriate agent based on the type of the root agent."""
-        if root_agent.type == "llm":
-            return await self.build_llm_agent(root_agent, enabled_tools)
-        elif root_agent.type == "a2a":
-            return await self.build_a2a_agent(root_agent)
-        elif root_agent.type == "workflow":
-            return await self.build_workflow_agent(root_agent)
-        elif root_agent.type == "task":
-            return await self.build_task_agent(root_agent)
-        else:
-            return await self.build_composite_agent(root_agent)
+        
+        if not root_agent:
+            raise ValueError("root_agent cannot be None")
+        
+        if not hasattr(root_agent, 'type') or not root_agent.type:
+            raise ValueError("root_agent must have a valid type")
+        
+        logger.info(f"Building agent: {root_agent.name} (type: {root_agent.type})")
+        
+        try:
+            if root_agent.type == "llm":
+                return await self.build_llm_agent(root_agent, enabled_tools)
+            elif root_agent.type == "a2a":
+                return await self.build_a2a_agent(root_agent)
+            elif root_agent.type == "workflow":
+                return await self.build_workflow_agent(root_agent)
+            elif root_agent.type == "task":
+                return await self.build_task_agent(root_agent)
+            elif root_agent.type in ["sequential", "parallel", "loop"]:
+                return await self.build_composite_agent(root_agent)
+            else:
+                raise ValueError(f"Unknown agent type: {root_agent.type}")
+                
+        except Exception as e:
+            logger.error(f"Error building agent {root_agent.name}: {str(e)}")
+            raise

@@ -30,6 +30,7 @@
 └──────────────────────────────────────────────────────────────────────────────┘
 """
 
+
 from datetime import datetime
 from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
@@ -40,10 +41,13 @@ from typing import AsyncGenerator, Dict, Any, List, TypedDict
 import uuid
 
 from src.services.agent_service import get_agent
+from src.utils.logger import setup_logger
 
 from sqlalchemy.orm import Session
 
 from langgraph.graph import StateGraph, END
+
+logger = setup_logger(__name__)
 
 
 class State(TypedDict):
@@ -63,6 +67,9 @@ class WorkflowAgent(BaseAgent):
 
     This agent allows defining and executing complex workflows between multiple agents
     using LangGraph for orchestration.
+    
+    IMPORTANT: Workflow agents are orchestrators and should NOT have a model configured.
+    They delegate to sub-agents that have their own models.
     """
 
     # Field declarations for Pydantic
@@ -89,6 +96,21 @@ class WorkflowAgent(BaseAgent):
             sub_agents: List of sub-agents to be executed after the workflow agent
             db: Session
         """
+        
+        # Workflow agents não devem ter modelos
+        if 'model' in kwargs:
+            logger.warning(f"Removing model from workflow agent {name}. Workflow agents should not have models.")
+            del kwargs['model']
+        
+        if not flow_json:
+            raise ValueError(f"Workflow agent {name} requires flow_json configuration")
+        
+        if not isinstance(flow_json, dict):
+            raise ValueError(f"Workflow agent {name} flow_json must be a dictionary")
+        
+        if not flow_json.get('nodes'):
+            raise ValueError(f"Workflow agent {name} flow_json must contain nodes")
+        
         # Initialize base class
         super().__init__(
             name=name,
@@ -98,9 +120,13 @@ class WorkflowAgent(BaseAgent):
             db=db,
             **kwargs,
         )
+        
+        if hasattr(self, 'model'):
+            logger.warning(f"Workflow agent {name} had a model attribute. Removing it.")
+            delattr(self, 'model')
 
-        print(
-            f"Workflow agent initialized with {len(flow_json.get('nodes', []))} nodes"
+        logger.info(
+            f"Workflow agent '{name}' initialized with {len(flow_json.get('nodes', []))} nodes"
         )
 
     async def _create_node_functions(self, ctx: InvocationContext):
@@ -112,11 +138,12 @@ class WorkflowAgent(BaseAgent):
             node_id: str,
             node_data: Dict[str, Any],
         ) -> AsyncGenerator[State, None]:
-            print("\n🏁 INITIAL NODE")
+            logger.info(f"🏁 INITIAL NODE: {node_id}")
 
             content = state.get("content", [])
 
             if not content:
+                logger.warning("No content found in initial state")
                 content = [
                     Event(
                         author=f"workflow-node:{node_id}",
@@ -128,9 +155,11 @@ class WorkflowAgent(BaseAgent):
                     "status": "error",
                     "node_outputs": {},
                     "cycle_count": 0,
-                    "conversation_history": ctx.session.events,
+                    "conversation_history": ctx.session.events if ctx.session else [],
+                    "session_id": state.get("session_id", ""),
                 }
                 return
+            
             session_id = state.get("session_id", "")
 
             # Store specific results for this node
@@ -149,7 +178,7 @@ class WorkflowAgent(BaseAgent):
                 "node_outputs": node_outputs,
                 "cycle_count": 0,
                 "session_id": session_id,
-                "conversation_history": ctx.session.events,
+                "conversation_history": ctx.session.events if ctx.session else [],
             }
 
         # Generic function for agent nodes
@@ -163,7 +192,7 @@ class WorkflowAgent(BaseAgent):
 
             # Increment cycle counter
             cycle_count = state.get("cycle_count", 0) + 1
-            print(f"\n👤 AGENT: {agent_name} (Cycle {cycle_count})")
+            logger.info(f"👤 AGENT: {agent_name} (Cycle {cycle_count})")
 
             content = state.get("content", [])
             session_id = state.get("session_id", "")
@@ -171,14 +200,13 @@ class WorkflowAgent(BaseAgent):
             # Get conversation history
             conversation_history = state.get("conversation_history", [])
 
-            agent = get_agent(self.db, agent_id)
-
-            if not agent:
+            if not agent_id:
+                logger.error(f"Agent node {node_id} does not have a valid agent_id")
                 yield {
                     "content": [
                         Event(
                             author=f"workflow-node:{node_id}",
-                            content=Content(parts=[Part(text="Agent not found")]),
+                            content=Content(parts=[Part(text="Agent ID not configured")]),
                         )
                     ],
                     "session_id": session_id,
@@ -189,44 +217,84 @@ class WorkflowAgent(BaseAgent):
                 }
                 return
 
-            # Import moved to inside the function to avoid circular import
-            from src.services.adk.agent_builder import AgentBuilder
+            agent = get_agent(self.db, agent_id)
 
-            agent_builder = AgentBuilder(self.db)
-            root_agent, exit_stack = await agent_builder.build_agent(agent)
+            if not agent:
+                logger.error(f"Agent not found for ID: {agent_id}")
+                yield {
+                    "content": [
+                        Event(
+                            author=f"workflow-node:{node_id}",
+                            content=Content(parts=[Part(text=f"Agent not found: {agent_id}")]),
+                        )
+                    ],
+                    "session_id": session_id,
+                    "status": "error",
+                    "node_outputs": {},
+                    "cycle_count": cycle_count,
+                    "conversation_history": conversation_history,
+                }
+                return
 
-            new_content = []
-            async for event in root_agent.run_async(ctx):
-                conversation_history.append(event)
-                
-                modified_event = Event(
-                    author=f"workflow-node:{node_id}", content=event.content
-                )
-                new_content.append(modified_event)
+            try:
+                # Import moved to inside the function to avoid circular import
+                from src.services.adk.agent_builder import AgentBuilder
 
+                agent_builder = AgentBuilder(self.db)
+                root_agent, exit_stack = await agent_builder.build_agent(agent)
 
-            print(f"New content: {new_content}")
+                new_content = []
+                async for event in root_agent.run_async(ctx):
+                    conversation_history.append(event)
+                    
+                    modified_event = Event(
+                        author=f"workflow-node:{node_id}", content=event.content
+                    )
+                    new_content.append(modified_event)
 
-            node_outputs = state.get("node_outputs", {})
-            node_outputs[node_id] = {
-                "processed_by": agent_name,
-                "agent_content": new_content,
-                "cycle": cycle_count,
-            }
+                logger.debug(f"Agent {agent_name} generated {len(new_content)} events")
 
-            content = content + new_content
+                node_outputs = state.get("node_outputs", {})
+                node_outputs[node_id] = {
+                    "processed_by": agent_name,
+                    "agent_id": agent_id,
+                    "agent_content": new_content,
+                    "cycle": cycle_count,
+                    "processed_at": datetime.now().isoformat(),
+                }
 
-            yield {
-                "content": content,
-                "status": "processed_by_agent",
-                "node_outputs": node_outputs,
-                "cycle_count": cycle_count,
-                "conversation_history": conversation_history,
-                "session_id": session_id,
-            }
+                content = content + new_content
 
-            if exit_stack:
-                await exit_stack.aclose()
+                yield {
+                    "content": content,
+                    "status": "processed_by_agent",
+                    "node_outputs": node_outputs,
+                    "cycle_count": cycle_count,
+                    "conversation_history": conversation_history,
+                    "session_id": session_id,
+                }
+
+                if exit_stack:
+                    try:
+                        await exit_stack.aclose()
+                    except Exception as e:
+                        logger.warning(f"Error closing exit stack for agent {agent_name}: {e}")
+
+            except Exception as e:
+                logger.error(f"Error executing agent {agent_name}: {str(e)}")
+                yield {
+                    "content": [
+                        Event(
+                            author=f"workflow-node:{node_id}",
+                            content=Content(parts=[Part(text=f"Error executing agent: {str(e)}")]),
+                        )
+                    ],
+                    "session_id": session_id,
+                    "status": "agent_error",
+                    "node_outputs": state.get("node_outputs", {}),
+                    "cycle_count": cycle_count,
+                    "conversation_history": conversation_history,
+                }
 
         # Function for condition nodes
         async def condition_node_function(
@@ -236,7 +304,7 @@ class WorkflowAgent(BaseAgent):
             conditions = node_data.get("conditions", [])
             cycle_count = state.get("cycle_count", 0)
 
-            print(f"\n🔄 CONDITION: {label} (Cycle {cycle_count})")
+            logger.info(f"🔄 CONDITION: {label} (Cycle {cycle_count})")
 
             content = state.get("content", [])
             conversation_history = state.get("conversation_history", [])
@@ -245,16 +313,17 @@ class WorkflowAgent(BaseAgent):
             if content and len(content) > 0:
                 for event in reversed(content):
                     if (
-                        event.author != "agent"
-                        or not hasattr(event.content, "parts")
-                        or not event.content.parts
+                        hasattr(event, 'author') and 
+                        event.author != "user" and
+                        hasattr(event, 'content') and 
+                        hasattr(event.content, "parts") and
+                        event.content.parts
                     ):
                         latest_event = event
                         break
+                        
                 if latest_event:
-                    print(
-                        f"Evaluating condition only for the most recent event: '{latest_event}'"
-                    )
+                    logger.debug(f"Evaluating condition for latest event from: {latest_event.author}")
 
             # Use only the most recent event for condition evaluation
             evaluation_state = state.copy()
@@ -273,25 +342,24 @@ class WorkflowAgent(BaseAgent):
                 operator = condition_data.get("operator")
                 expected_value = condition_data.get("value")
 
-                print(
-                    f"  Checking if {field} {operator} '{expected_value}' (current value: '{evaluation_state.get(field, '')}')"
+                logger.debug(
+                    f"Checking condition: {field} {operator} '{expected_value}'"
                 )
+                
                 if self._evaluate_condition(condition, evaluation_state):
                     conditions_met.append(condition_id)
                     condition_details.append(
                         f"{field} {operator} '{expected_value}' ✅"
                     )
-                    print(f"  ✅ Condition {condition_id} met!")
+                    logger.info(f"✅ Condition {condition_id} met!")
                 else:
                     condition_details.append(
                         f"{field} {operator} '{expected_value}' ❌"
                     )
 
-            # Check if the cycle reached the limit (extra security)
-            if cycle_count >= 10:
-                print(
-                    f"⚠️ ATTENTION: Cycle limit reached ({cycle_count}). Forcing termination."
-                )
+            max_cycles = 10  # Poderia vir da configuração
+            if cycle_count >= max_cycles:
+                logger.warning(f"Cycle limit reached ({cycle_count}). Forcing termination.")
 
                 condition_content = [
                     Event(
@@ -314,10 +382,10 @@ class WorkflowAgent(BaseAgent):
             node_outputs = state.get("node_outputs", {})
             node_outputs[node_id] = {
                 "condition_evaluated": label,
-                "content_evaluated": content,
                 "conditions_met": conditions_met,
                 "condition_details": condition_details,
                 "cycle": cycle_count,
+                "evaluated_at": datetime.now().isoformat(),
             }
 
             # Prepare a more descriptive message about the conditions
@@ -334,7 +402,8 @@ class WorkflowAgent(BaseAgent):
                             )
                         ]
                     ),
-                )            ]
+                )
+            ]
             content = content + condition_content
             
             yield {
@@ -353,7 +422,7 @@ class WorkflowAgent(BaseAgent):
             message_type = message_data.get("type", "text")
             message_content = message_data.get("content", "")
 
-            print(f"\n💬 MESSAGE-NODE: {message_content}")
+            logger.info(f"💬 MESSAGE-NODE: {message_content}")
 
             content = state.get("content", [])
             session_id = state.get("session_id", "")
@@ -371,6 +440,8 @@ class WorkflowAgent(BaseAgent):
             node_outputs[node_id] = {
                 "message_type": message_type,
                 "message_content": message_content,
+                "label": label,
+                "processed_at": datetime.now().isoformat(),
             }
 
             yield {
@@ -378,7 +449,8 @@ class WorkflowAgent(BaseAgent):
                 "status": "message_added",
                 "node_outputs": node_outputs,
                 "cycle_count": state.get("cycle_count", 0),
-                "conversation_history": conversation_history,            "session_id": session_id,
+                "conversation_history": conversation_history,
+                "session_id": session_id,
             }
             
         async def delay_node_function(
@@ -389,6 +461,10 @@ class WorkflowAgent(BaseAgent):
             delay_unit = delay_data.get("unit", "seconds")
             delay_description = delay_data.get("description", "")
             
+            if delay_value <= 0:
+                logger.warning(f"Invalid delay value: {delay_value}. Using 1 second.")
+                delay_value = 1
+            
             # Convert to seconds based on unit
             delay_seconds = delay_value
             if delay_unit == "minutes":
@@ -397,7 +473,7 @@ class WorkflowAgent(BaseAgent):
                 delay_seconds = delay_value * 3600
             
             label = node_data.get("label", "delay_node")
-            print(f"\n⏱️ DELAY-NODE: {delay_value} {delay_unit} - {delay_description}")
+            logger.info(f"⏱️ DELAY-NODE: {delay_value} {delay_unit} ({delay_seconds}s) - {delay_description}")
             
             content = state.get("content", [])
             session_id = state.get("session_id", "")
@@ -409,13 +485,17 @@ class WorkflowAgent(BaseAgent):
                 "delay_value": delay_value,
                 "delay_unit": delay_unit,
                 "delay_seconds": delay_seconds,
+                "delay_description": delay_description,
                 "delay_start_time": datetime.now().isoformat(),
             }
             
             # Actually perform the delay
             import asyncio
-            await asyncio.sleep(delay_seconds)
-            
+            try:
+                await asyncio.sleep(delay_seconds)
+            except asyncio.CancelledError:
+                logger.warning(f"Delay in node {node_id} was cancelled")
+                # Continue execution even if delay was cancelled
             
             # Update node outputs with completion information
             node_outputs[node_id]["delay_end_time"] = datetime.now().isoformat()
@@ -424,7 +504,8 @@ class WorkflowAgent(BaseAgent):
             yield {
                 "content": content,
                 "status": "delay_completed",
-                "node_outputs": node_outputs,            "cycle_count": state.get("cycle_count", 0),
+                "node_outputs": node_outputs,
+                "cycle_count": state.get("cycle_count", 0),
                 "conversation_history": conversation_history,
                 "session_id": session_id,
             }
@@ -452,7 +533,7 @@ class WorkflowAgent(BaseAgent):
 
             result = self._process_condition(operator, actual_value, expected_value)
 
-            print(f"  Check '{operator}': {result}")
+            logger.debug(f"Condition check '{operator}': {result}")
             return result
 
         return False
@@ -488,7 +569,7 @@ class WorkflowAgent(BaseAgent):
 
         if extracted_texts:
             joined_text = " ".join(extracted_texts)
-            print(f"  Extracted text from events: '{joined_text[:100]}...'")
+            logger.debug(f"Extracted text from events: '{joined_text[:100]}...'")
             return joined_text
 
         return ""
@@ -524,6 +605,7 @@ class WorkflowAgent(BaseAgent):
         elif operator in ["matches", "not_matches"]:
             return self._check_regex(operator, actual_str, expected_str)
 
+        logger.warning(f"Unknown operator: {operator}")
         return False
 
     def _check_definition(self, operator, actual_value):
@@ -563,8 +645,8 @@ class WorkflowAgent(BaseAgent):
             else:  # less_than_or_equal
                 return actual_num <= expected_num
         except (ValueError, TypeError):
-            print(
-                f"  Error converting values for numeric comparison: '{actual_str[:100]}...' and '{expected_str}'"
+            logger.warning(
+                f"Error converting values for numeric comparison: '{actual_str[:100]}...' and '{expected_str}'"
             )
             return False
 
@@ -579,7 +661,7 @@ class WorkflowAgent(BaseAgent):
             else:  # not_matches
                 return not bool(pattern.search(actual_str))
         except re.error:
-            print(f"  Error in regular expression: '{expected_str}'")
+            logger.warning(f"Error in regular expression: '{expected_str}'")
             return (
                 operator == "not_matches"
             )  # Return True for not_matches, False for matches
@@ -589,8 +671,8 @@ class WorkflowAgent(BaseAgent):
         expected_lower = expected_str.lower()
         actual_lower = actual_str.lower()
 
-        print(
-            f"  Comparison '{operator}' without case distinction: '{expected_lower}' in '{actual_lower[:100]}...'"
+        logger.debug(
+            f"Comparison '{operator}' case insensitive: '{expected_lower}' in '{actual_lower[:100]}...'"
         )
 
         if operator == "contains":
@@ -627,14 +709,13 @@ class WorkflowAgent(BaseAgent):
         # Routing function for each specific node
         def create_router_for_node(node_id: str):
             def router(state: State) -> str:
-                print(f"Routing from node: {node_id}")
+                logger.debug(f"Routing from node: {node_id}")
 
                 # Check if the cycle limit has been reached
                 cycle_count = state.get("cycle_count", 0)
-                if cycle_count >= 10:
-                    print(
-                        f"⚠️ Cycle limit ({cycle_count}) reached. Finalizing the flow."
-                    )
+                max_cycles = 10  # Configurável
+                if cycle_count >= max_cycles:
+                    logger.warning(f"Cycle limit ({cycle_count}) reached. Finalizing the flow.")
                     return END
 
                 # If it's a condition node, evaluate the conditions
@@ -648,32 +729,29 @@ class WorkflowAgent(BaseAgent):
                         if conditions_met:
                             any_condition_met = True
                             condition_id = conditions_met[0]
-                            print(
-                                f"Using stored condition evaluation result: Condition {condition_id} met."
-                            )
+                            logger.debug(f"Using stored condition result: Condition {condition_id} met.")
                             if (
                                 node_id in edges_map
                                 and condition_id in edges_map[node_id]
                             ):
                                 return edges_map[node_id][condition_id]
                         else:
-                            print(
-                                "Using stored condition evaluation result: No conditions met."
-                            )
+                            logger.debug("Using stored condition result: No conditions met.")
                     else:
+                        # Evaluate conditions
                         for condition in conditions:
                             condition_id = condition.get("id")
 
                             # Get latest event for evaluation, ignoring condition node informational events
                             content = state.get("content", [])
 
-                            # Filter out events generated by condition nodes or informational messages
+                            # Filter out events generated by condition nodes or that contain evaluation results
                             filtered_content = []
                             for event in content:
                                 # Ignore events from condition nodes or that contain evaluation results
                                 if not hasattr(event, "author") or not (
-                                    event.author.startswith("Condition")
-                                    or "Condition evaluated:" in str(event)
+                                    event.author.startswith("workflow-node:") and 
+                                    "Condition evaluated:" in str(event)
                                 ):
                                     filtered_content.append(event)
 
@@ -687,9 +765,7 @@ class WorkflowAgent(BaseAgent):
 
                             if is_condition_met:
                                 any_condition_met = True
-                                print(
-                                    f"Condition {condition_id} met. Moving to the next node."
-                                )
+                                logger.debug(f"Condition {condition_id} met. Moving to next node.")
 
                                 # Find the connection that uses this condition_id as a handle
                                 if (
@@ -698,9 +774,7 @@ class WorkflowAgent(BaseAgent):
                                 ):
                                     return edges_map[node_id][condition_id]
                             else:
-                                print(
-                                    f"Condition {condition_id} not met. Continuing evaluation or using default path."
-                                )
+                                logger.debug(f"Condition {condition_id} not met.")
 
                     # If no condition is met, use the bottom-handle if available
                     if not any_condition_met:
@@ -708,14 +782,10 @@ class WorkflowAgent(BaseAgent):
                             node_id in edges_map
                             and "bottom-handle" in edges_map[node_id]
                         ):
-                            print(
-                                "No condition met. Using default path (bottom-handle)."
-                            )
+                            logger.debug("No condition met. Using default path (bottom-handle).")
                             return edges_map[node_id]["bottom-handle"]
                         else:
-                            print(
-                                "No condition met and no default path. Closing the flow."
-                            )
+                            logger.debug("No condition met and no default path. Closing the flow.")
                             return END
 
                 # For regular nodes, simply follow the first available connection
@@ -731,7 +801,7 @@ class WorkflowAgent(BaseAgent):
                         return edges_map[node_id][first_handle]
 
                 # If there is no output connection, close the flow
-                print(f"No output connection from node {node_id}. Closing the flow.")
+                logger.debug(f"No output connection from node {node_id}. Closing the flow.")
                 return END
 
             return router
@@ -745,6 +815,9 @@ class WorkflowAgent(BaseAgent):
         # Extract nodes from the flow
         nodes = flow_data.get("nodes", [])
 
+        if not nodes:
+            raise ValueError("Flow data must contain at least one node")
+
         # Initialize StateGraph
         graph_builder = StateGraph(State)
 
@@ -754,34 +827,60 @@ class WorkflowAgent(BaseAgent):
         # Dictionary to store specific functions for each node
         node_specific_functions = {}
 
+        valid_node_types = set(node_functions.keys())
+        
         # Add nodes to the graph
         for node in nodes:
             node_id = node.get("id")
             node_type = node.get("type")
             node_data = node.get("data", {})
 
-            if node_type in node_functions:
-                # Create a specific function for this node
-                def create_node_function(node_type, node_id, node_data):
-                    async def node_function(state):
-                        # Consume the asynchronous generator and return the last result
-                        result = None
+            if not node_id:
+                logger.warning(f"Skipping node without ID: {node}")
+                continue
+
+            if node_type not in valid_node_types:
+                logger.warning(f"Unknown node type '{node_type}' for node {node_id}. Skipping.")
+                continue
+
+            # Create a specific function for this node
+            def create_node_function(node_type, node_id, node_data):
+                async def node_function(state):
+                    # Consume the asynchronous generator and return the last result
+                    result = None
+                    try:
                         async for item in node_functions[node_type](
                             state, node_id, node_data
                         ):
                             result = item
                         return result
+                    except Exception as e:
+                        logger.error(f"Error in node {node_id} ({node_type}): {str(e)}")
+                        # Return error state
+                        return {
+                            "content": [
+                                Event(
+                                    author=f"workflow-node:{node_id}",
+                                    content=Content(parts=[Part(text=f"Node error: {str(e)}")]),
+                                )
+                            ],
+                            "status": "node_error",
+                            "node_outputs": state.get("node_outputs", {}),
+                            "cycle_count": state.get("cycle_count", 0),
+                            "conversation_history": state.get("conversation_history", []),
+                            "session_id": state.get("session_id", ""),
+                        }
 
-                    return node_function
+                return node_function
 
-                # Add specific function to the dictionary
-                node_specific_functions[node_id] = create_node_function(
-                    node_type, node_id, node_data
-                )
+            # Add specific function to the dictionary
+            node_specific_functions[node_id] = create_node_function(
+                node_type, node_id, node_data
+            )
 
-                # Add node to the graph
-                print(f"Adding node {node_id} of type {node_type}")
-                graph_builder.add_node(node_id, node_specific_functions[node_id])
+            # Add node to the graph
+            logger.debug(f"Adding node {node_id} of type {node_type}")
+            graph_builder.add_node(node_id, node_specific_functions[node_id])
 
         # Create function to generate specific routers
         create_router = self._create_flow_router(flow_data)
@@ -808,8 +907,8 @@ class WorkflowAgent(BaseAgent):
                 node_router = create_router(node_id)
 
                 # Add conditional connections
-                print(f"Adding conditional connections for node {node_id}")
-                print(f"Possible destinations: {edge_destinations}")
+                logger.debug(f"Adding conditional connections for node {node_id}")
+                logger.debug(f"Possible destinations: {list(edge_destinations.keys())}")
 
                 graph_builder.add_conditional_edges(
                     node_id, node_router, edge_destinations
@@ -825,35 +924,56 @@ class WorkflowAgent(BaseAgent):
         # If there is no start-node, use the first node found
         if not entry_point and nodes:
             entry_point = nodes[0].get("id")
+            logger.warning(f"No start-node found, using first node as entry point: {entry_point}")
 
         # Define the entry point
         if entry_point:
-            print(f"Defining entry point: {entry_point}")
+            logger.info(f"Setting entry point: {entry_point}")
             graph_builder.set_entry_point(entry_point)
+        else:
+            raise ValueError("No valid entry point found for workflow")
 
         # Compile the graph
-        return graph_builder.compile()
+        try:
+            compiled_graph = graph_builder.compile()
+            logger.info("Workflow graph compiled successfully")
+            return compiled_graph
+        except Exception as e:
+            logger.error(f"Error compiling workflow graph: {str(e)}")
+            raise ValueError(f"Error compiling workflow graph: {str(e)}")
 
     async def _run_async_impl(
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
         """Implementation of the workflow agent executing the defined workflow and returning results."""
+        
+        if hasattr(self, 'model') and self.model:
+            logger.error(f"Workflow agent {self.name} should not have a model configured")
+            raise ValueError(f"Workflow agent {self.name} is an orchestrator and should not have a model. Models should be configured on sub-agents.")
+
         try:
+            logger.info(f"Starting workflow execution for agent: {self.name}")
+            logger.debug(f"Context session ID: {ctx.session.id if ctx.session else 'No session'}")
+            
             user_message = await self._extract_user_message(ctx)
             session_id = self._get_session_id(ctx)
+            
+            if not self.flow_json:
+                raise ValueError("Workflow agent has no flow_json configured")
+            
             graph = await self._create_graph(ctx, self.flow_json)
             initial_state = await self._prepare_initial_state(
                 ctx, user_message, session_id
             )
 
-            print("\n🚀 Starting workflow execution:")
-            print(f"Initial content: {user_message[:100]}...")
+            logger.info(f"🚀 Starting workflow execution with initial message: {user_message[:100]}...")
 
             # Iterar sobre o AsyncGenerator em vez de usar await
             async for event in self._execute_workflow(ctx, graph, initial_state):
                 yield event
 
         except Exception as e:
+            logger.error(f"Error in workflow execution: {str(e)}", exc_info=True)
             yield await self._handle_workflow_error(e)
 
     async def _extract_user_message(self, ctx: InvocationContext) -> str:
@@ -861,24 +981,36 @@ class WorkflowAgent(BaseAgent):
         # Try to find message in session events
         if ctx.session and hasattr(ctx.session, "events") and ctx.session.events:
             for event in reversed(ctx.session.events):
-                if event.author == "user" and event.content and event.content.parts:
-                    print("Message found in session events")
+                if (
+                    hasattr(event, 'author') and 
+                    event.author == "user" and 
+                    hasattr(event, 'content') and 
+                    event.content and 
+                    hasattr(event.content, 'parts') and 
+                    event.content.parts
+                ):
+                    logger.debug("User message found in session events")
                     return event.content.parts[0].text
 
         # Try to find message in session state
-        if ctx.session and ctx.session.state:
+        if ctx.session and hasattr(ctx.session, 'state') and ctx.session.state:
             if "user_message" in ctx.session.state:
                 return ctx.session.state["user_message"]
             elif "message" in ctx.session.state:
                 return ctx.session.state["message"]
 
-        return ""
+        logger.warning("No user message found in context")
+        return "No user message provided"
 
     def _get_session_id(self, ctx: InvocationContext) -> str:
         """Gets or generates a session ID."""
-        if ctx.session and hasattr(ctx.session, "id"):
+        if ctx.session and hasattr(ctx.session, "id") and ctx.session.id:
             return str(ctx.session.id)
-        return str(uuid.uuid4())
+        
+        # Generate a new session ID
+        new_session_id = str(uuid.uuid4())
+        logger.debug(f"Generated new session ID: {new_session_id}")
+        return new_session_id
 
     async def _prepare_initial_state(
         self, ctx: InvocationContext, user_message: str, session_id: str
@@ -889,9 +1021,13 @@ class WorkflowAgent(BaseAgent):
             content=Content(parts=[Part(text=user_message)]),
         )
 
-        conversation_history = ctx.session.events or [user_event]
+        conversation_history = []
+        if ctx.session and hasattr(ctx.session, 'events') and ctx.session.events:
+            conversation_history = ctx.session.events.copy()
+        else:
+            conversation_history = [user_event]
 
-        return State(
+        initial_state = State(
             content=[user_event],
             status="started",
             session_id=session_id,
@@ -899,30 +1035,57 @@ class WorkflowAgent(BaseAgent):
             node_outputs={},
             conversation_history=conversation_history,
         )
+        
+        logger.debug(f"Initial state prepared with {len(conversation_history)} history events")
+        return initial_state
 
     async def _execute_workflow(
         self, ctx: InvocationContext, graph: StateGraph, initial_state: State
     ) -> AsyncGenerator[Event, None]:
         """Executes the workflow graph and yields events."""
         sent_events = 0
+        total_iterations = 0
+        max_iterations = 100  
 
-        async for state in graph.astream(initial_state, {"recursion_limit": 100}):
-            for node_state in state.values():
-                content = node_state.get("content", [])
-                for event in content[sent_events:]:
-                    if event.author != "user":
+        try:
+            async for state in graph.astream(initial_state, {"recursion_limit": max_iterations}):
+                total_iterations += 1
+                
+                if total_iterations > max_iterations:
+                    logger.warning(f"Maximum iterations ({max_iterations}) reached, stopping workflow")
+                    break
+                
+                for node_state in state.values():
+                    content = node_state.get("content", [])
+                    
+                    # Yield new events that haven't been sent yet
+                    for event in content[sent_events:]:
+                        if hasattr(event, 'author') and event.author != "user":
+                            yield event
+                    
+                    sent_events = len(content)
+
+            logger.info(f"Workflow completed after {total_iterations} iterations")
+
+        except Exception as e:
+            logger.error(f"Error during workflow execution: {str(e)}")
+            yield await self._handle_workflow_error(e)
+
+        if self.sub_agents:
+            logger.info(f"Executing {len(self.sub_agents)} sub-agents")
+            for sub_agent in self.sub_agents:
+                try:
+                    async for event in sub_agent.run_async(ctx):
                         yield event
-                sent_events = len(content)
-
-        # Execute sub-agents if any
-        for sub_agent in self.sub_agents:
-            async for event in sub_agent.run_async(ctx):
-                yield event
+                except Exception as e:
+                    logger.error(f"Error executing sub-agent {sub_agent.name}: {str(e)}")
+                    yield await self._handle_workflow_error(e)
 
     async def _handle_workflow_error(self, error: Exception) -> Event:
         """Creates an error event for workflow execution errors."""
-        error_msg = f"Error executing the workflow agent: {str(error)}"
-        print(error_msg)
+        error_msg = f"Error executing workflow agent '{self.name}': {str(error)}"
+        logger.error(error_msg)
+        
         return Event(
             author=f"workflow-error:{self.name}",
             content=Content(
