@@ -427,7 +427,7 @@ class MCPServerBase(BaseModel):
     @field_validator("config_type")
     @classmethod
     def validate_config_type(cls, v):
-        valid_types = ["studio", "custom"]
+        valid_types = ["studio", "sse"]
         if v not in valid_types:
             raise ValueError(f"config_type must be one of: {valid_types}")
         return v
@@ -435,7 +435,7 @@ class MCPServerBase(BaseModel):
     @field_validator("type")
     @classmethod
     def validate_type(cls, v):
-        valid_types = ["official", "custom"]
+        valid_types = ["official", "community"]
         if v not in valid_types:
             raise ValueError(f"type must be one of: {valid_types}")
         return v
