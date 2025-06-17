@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/evolutionapi-evo-ai-badge.png)](https://mseep.ai/app/evolutionapi-evo-ai)
+
 <h1 align="center">Evo AI - AI Agents Platform</h1>
 
 <div align="center">
