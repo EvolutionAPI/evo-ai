@@ -52,6 +52,7 @@ from src.services import (
 from src.schemas.chat import ChatRequest, ChatResponse, ErrorResponse, FileData
 from src.services.adk.agent_runner import run_agent as run_agent_adk, run_agent_stream
 from src.services.crewai.agent_runner import run_agent as run_agent_crewai
+from src.services.ag2.agent_runner import run_agent as run_agent_ag2, run_agent_stream as run_agent_stream_ag2
 from src.core.exceptions import AgentNotFoundError
 from src.services.service_providers import (
     session_service,
@@ -221,16 +222,26 @@ async def websocket_chat(
                             logger.error(f"Error processing files: {str(e)}")
                             files = None
 
-                    async for chunk in run_agent_stream(
-                        agent_id=agent_id,
-                        external_id=external_id,
-                        message=message,
-                        session_service=session_service,
-                        artifacts_service=artifacts_service,
-                        memory_service=memory_service,
-                        db=db,
-                        files=files,
-                    ):
+                    if settings.AI_ENGINE == "ag2":
+                        stream_gen = run_agent_stream_ag2(
+                            agent_id=agent_id,
+                            external_id=external_id,
+                            message=message,
+                            db=db,
+                            files=files,
+                        )
+                    else:
+                        stream_gen = run_agent_stream(
+                            agent_id=agent_id,
+                            external_id=external_id,
+                            message=message,
+                            session_service=session_service,
+                            artifacts_service=artifacts_service,
+                            memory_service=memory_service,
+                            db=db,
+                            files=files,
+                        )
+                    async for chunk in stream_gen:
                         await websocket.send_json(
                             {"message": json.loads(chunk), "turn_complete": False}
                         )
@@ -293,6 +304,15 @@ async def chat(
             )
         elif settings.AI_ENGINE == "crewai":
             final_response = await run_agent_crewai(
+                agent_id,
+                external_id,
+                request.message,
+                session_service,
+                db,
+                files=request.files,
+            )
+        elif settings.AI_ENGINE == "ag2":
+            final_response = await run_agent_ag2(
                 agent_id,
                 external_id,
                 request.message,
