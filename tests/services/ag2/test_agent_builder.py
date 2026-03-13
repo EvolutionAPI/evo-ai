@@ -3,6 +3,7 @@ import asyncio
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from autogen import ConversableAgent
+from autogen.agentchat.group import TerminateTarget, RevertToUserTarget
 from src.services.ag2.agent_builder import AG2AgentBuilder
 
 
@@ -175,3 +176,69 @@ def test_apply_handoffs_skips_unknown_type(mock_db):
     builder._apply_handoffs(
         ca, {"handoffs": [{"type": "unknown", "target_agent_id": "x"}]}, {}
     )
+
+
+def test_apply_handoffs_registers_llm_condition(mock_db):
+    """LLM-type handoff adds an OnCondition via add_llm_conditions."""
+    builder = AG2AgentBuilder(db=mock_db)
+    ca = MagicMock()
+    target = MagicMock()
+    target.name = "target_agent"  # AgentTarget validates agent_name as str
+    all_agents = {"target-uuid": target}
+    config = {
+        "handoffs": [
+            {"type": "llm", "target_agent_id": "target-uuid", "condition": "user asks about billing"}
+        ]
+    }
+    builder._apply_handoffs(ca, config, all_agents)
+    ca.handoffs.add_llm_conditions.assert_called_once()
+    conditions = ca.handoffs.add_llm_conditions.call_args[0][0]
+    assert len(conditions) == 1
+
+
+def test_apply_handoffs_registers_context_condition(mock_db):
+    """Context-type handoff adds an OnContextCondition via add_context_conditions."""
+    builder = AG2AgentBuilder(db=mock_db)
+    ca = MagicMock()
+    target = MagicMock()
+    target.name = "target_agent"  # AgentTarget validates agent_name as str
+    all_agents = {"target-uuid": target}
+    config = {
+        "handoffs": [
+            {"type": "context", "target_agent_id": "target-uuid", "expression": "${is_vip} == True"}
+        ]
+    }
+    builder._apply_handoffs(ca, config, all_agents)
+    ca.handoffs.add_context_conditions.assert_called_once()
+    conditions = ca.handoffs.add_context_conditions.call_args[0][0]
+    assert len(conditions) == 1
+
+
+def test_apply_handoffs_after_work_terminate(mock_db):
+    """after_work='terminate' sets TerminateTarget on the agent."""
+    builder = AG2AgentBuilder(db=mock_db)
+    ca = MagicMock()
+    builder._apply_handoffs(ca, {"after_work": "terminate", "handoffs": []}, {})
+    call_arg = ca.handoffs.set_after_work.call_args[0][0]
+    assert isinstance(call_arg, TerminateTarget)
+
+
+def test_apply_handoffs_after_work_default_reverts_to_user(mock_db):
+    """Omitting after_work defaults to RevertToUserTarget."""
+    builder = AG2AgentBuilder(db=mock_db)
+    ca = MagicMock()
+    builder._apply_handoffs(ca, {"handoffs": []}, {})
+    call_arg = ca.handoffs.set_after_work.call_args[0][0]
+    assert isinstance(call_arg, RevertToUserTarget)
+
+
+@pytest.mark.asyncio
+async def test_build_group_chat_setup_raises_on_missing_sub_agent(mock_db):
+    """build_group_chat_setup raises ValueError when a sub-agent is not found in the DB."""
+    record = MagicMock()
+    record.config = {"ag2_mode": "group_chat", "sub_agents": ["missing-uuid"]}
+    record.api_key = "test"
+    builder = AG2AgentBuilder(db=mock_db)
+    with patch("src.services.ag2.agent_builder.get_agent", return_value=None):
+        with pytest.raises(ValueError, match="not found"):
+            await builder.build_group_chat_setup(record)
