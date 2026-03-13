@@ -28,7 +28,6 @@
 """
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
-import os
 from src.utils.logger import setup_logger
 from src.services.mcp_server_service import get_mcp_server
 from sqlalchemy.orm import Session
@@ -156,9 +155,6 @@ class AG2MCPService:
                 command = server_config.get("command", "npx")
                 args = server_config.get("args", [])
                 env = server_config.get("env", {})
-                if env:
-                    for key, value in env.items():
-                        os.environ[key] = value
                 server = McpServer({"command": command, "args": args, "env": env})
 
             tools = await server.list_tools()

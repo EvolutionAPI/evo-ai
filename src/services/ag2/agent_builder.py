@@ -98,19 +98,24 @@ class AG2AgentBuilder:
                 logger.warning(f"Handoff target {target_id} not found, skipping")
                 continue
 
-            if h["type"] == "llm":
+            h_type = h.get("type")
+            if h_type not in ("llm", "context"):
+                logger.warning(f"Unknown or missing handoff type {h_type!r} for target {target_id}, skipping")
+                continue
+
+            if h_type == "llm":
                 llm_conditions.append(
                     OnCondition(
                         target=AgentTarget(target_agent),
-                        condition=StringLLMCondition(prompt=h["condition"]),
+                        condition=StringLLMCondition(prompt=h.get("condition", "")),
                     )
                 )
-            elif h["type"] == "context":
+            elif h_type == "context":
                 context_conditions.append(
                     OnContextCondition(
                         target=AgentTarget(target_agent),
                         condition=ExpressionContextCondition(
-                            expression=ContextExpression(h["expression"])
+                            expression=ContextExpression(h.get("expression", ""))
                         ),
                     )
                 )
@@ -136,13 +141,16 @@ class AG2AgentBuilder:
         if not sub_agent_ids:
             raise ValueError("group_chat agent requires at least one sub_agent")
 
-        # Build all sub-agents first so handoff resolution can reference them
-        all_agents = {}
+        # Build all sub-agents first so handoff resolution can reference them.
+        # Cache db_agent records to avoid re-fetching them in the handoff pass.
+        all_agents: dict = {}
         agents = []
+        db_sub_agents: dict = {}
         for aid in sub_agent_ids:
             db_agent = get_agent(self.db, str(aid))
             if db_agent is None:
                 raise ValueError(f"Sub-agent {aid} not found")
+            db_sub_agents[str(aid)] = db_agent
             ca = await self.build_conversable_agent(db_agent)
             all_agents[str(aid)] = ca
             agents.append(ca)
@@ -150,9 +158,9 @@ class AG2AgentBuilder:
         root_ca = await self.build_conversable_agent(root_agent)
         all_agents[str(root_agent.id)] = root_ca
 
-        # Apply handoffs to each agent if configured
+        # Apply handoffs using the already-fetched db_agent records
         for aid in sub_agent_ids:
-            db_agent = get_agent(self.db, str(aid))
+            db_agent = db_sub_agents.get(str(aid))
             if db_agent and db_agent.config:
                 self._apply_handoffs(all_agents[str(aid)], db_agent.config, all_agents)
 

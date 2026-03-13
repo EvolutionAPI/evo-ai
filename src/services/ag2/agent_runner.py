@@ -21,7 +21,6 @@ async def run_agent(
     session_service: AG2SessionService,
     db: Session,
     session_id: Optional[str] = None,
-    timeout: float = 60.0,
     files: Optional[list] = None,
 ) -> dict:
     tracer = get_tracer()
@@ -37,7 +36,7 @@ async def run_agent(
         result, _ = await builder.build_agent(db_agent)
 
         # Reconstruct conversation history as AG2 message list
-        session = session_service.get_or_create(agent_id, external_id)
+        session = session_service.get_or_create(agent_id, external_id, session_id)
         history = session_service.build_messages(session)
 
         try:
@@ -45,7 +44,7 @@ async def run_agent(
             if ag2_mode == "group_chat":
                 chat_result, final_context, last_agent = initiate_group_chat(
                     pattern=result["pattern"],
-                    messages=history + [message],
+                    messages=history + [{"role": "user", "content": message}],
                     max_rounds=result["max_rounds"],
                     context_variables=result["context_variables"],
                 )
@@ -99,6 +98,7 @@ async def run_agent_stream(
     agent_id: str,
     external_id: str,
     message: str,
+    session_service: AG2SessionService,
     db: Session,
     session_id: Optional[str] = None,
     files: Optional[list] = None,
@@ -111,11 +111,6 @@ async def run_agent_stream(
     Token-level streaming can be added in a future iteration by wiring
     ConversableAgent's `process_last_received_message` hook to a queue.
     """
-    from src.services.ag2.session_service import AG2SessionService
-    from src.config.settings import get_settings
-    settings = get_settings()
-    session_service = AG2SessionService(db_url=settings.POSTGRES_CONNECTION_STRING)
-
     result = await run_agent(
         agent_id=agent_id,
         external_id=external_id,

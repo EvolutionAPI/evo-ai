@@ -111,7 +111,14 @@ class AG2CustomToolBuilder:
                         f"Error in the request: {response.status_code} - {response.text}"
                     )
 
-                return json.dumps(response.json())
+                try:
+                    response_data = response.json()
+                except ValueError:
+                    response_data = {
+                        "status_code": response.status_code,
+                        "raw_response": response.text,
+                    }
+                return json.dumps(response_data)
 
             except Exception as e:
                 logger.error(f"Error executing tool {name}: {str(e)}")

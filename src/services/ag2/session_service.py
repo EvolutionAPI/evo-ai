@@ -33,7 +33,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import create_engine, Text
-from sqlalchemy.ext.mutable import MutableDict
+from sqlalchemy.ext.mutable import MutableList
 from sqlalchemy.orm import (
     sessionmaker,
     DeclarativeBase,
@@ -54,6 +54,7 @@ class DynamicJSON(TypeDecorator):
     """JSON type that uses JSONB in PostgreSQL and TEXT with JSON serialization elsewhere."""
 
     impl = Text
+    cache_ok = True
 
     def load_dialect_impl(self, dialect):
         if dialect.name == "postgresql":
@@ -92,8 +93,8 @@ class AG2StorageSession(Base):
     id: Mapped[str] = mapped_column(
         String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
-    messages: Mapped[MutableDict[str, Any]] = mapped_column(
-        MutableDict.as_mutable(DynamicJSON), default=[]
+    messages: Mapped[List[Any]] = mapped_column(
+        MutableList.as_mutable(DynamicJSON), default=lambda: []
     )
     create_time: Mapped[DateTime] = mapped_column(DateTime(), default=func.now())
     update_time: Mapped[DateTime] = mapped_column(
@@ -127,31 +128,35 @@ class AG2SessionService:
         self.SessionLocal = sessionmaker(bind=self.engine)
         logger.info(f"AG2SessionService started with database at {db_url}")
 
-    def get_or_create(self, agent_id: str, external_id: str) -> AG2Session:
-        """Retrieve an existing session or create a new one."""
-        session_id = f"{external_id}_{agent_id}"
+    def get_or_create(
+        self, agent_id: str, external_id: str, session_id: Optional[str] = None
+    ) -> AG2Session:
+        """Retrieve an existing session or create a new one.
+
+        All work is done in a single DB session to avoid extra roundtrips and
+        the race window that exists between two separate transactions.
+        """
+        sid = session_id or f"{external_id}_{agent_id}"
         with self.SessionLocal() as db:
-            record = db.get(AG2StorageSession, (agent_id, external_id, session_id))
+            record = db.get(AG2StorageSession, (agent_id, external_id, sid))
             if record is None:
                 record = AG2StorageSession(
                     app_name=agent_id,
                     user_id=external_id,
-                    id=session_id,
+                    id=sid,
                     messages=[],
                 )
                 db.add(record)
                 db.commit()
                 db.refresh(record)
                 logger.info(
-                    f"Created new AG2 session {session_id} for agent {agent_id} / user {external_id}"
+                    f"Created new AG2 session {sid} for agent {agent_id} / user {external_id}"
                 )
+            # Access messages while the session is still open so lazy loading works.
+            messages = list(record.messages) if isinstance(record.messages, list) else []
 
-        session = AG2Session(app_name=agent_id, user_id=external_id, session_id=session_id)
-        # Load persisted messages
-        with self.SessionLocal() as db:
-            record = db.get(AG2StorageSession, (agent_id, external_id, session_id))
-            if record and record.messages:
-                session.messages = list(record.messages) if isinstance(record.messages, list) else []
+        session = AG2Session(app_name=agent_id, user_id=external_id, session_id=sid)
+        session.messages = messages
         return session
 
     def build_messages(self, session: AG2Session) -> List[Dict[str, Any]]:

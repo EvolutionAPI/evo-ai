@@ -227,6 +227,7 @@ async def websocket_chat(
                             agent_id=agent_id,
                             external_id=external_id,
                             message=message,
+                            session_service=session_service,
                             db=db,
                             files=files,
                         )
