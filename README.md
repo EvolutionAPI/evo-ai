@@ -26,6 +26,7 @@ The Evo AI platform allows:
 - Custom tools management
 - **[Google Agent Development Kit (ADK)](https://google.github.io/adk-docs/)**: Base framework for agent development
 - **[CrewAI Support](https://github.com/crewAI/crewAI)**: Alternative framework for agent development (in development)
+- **[AG2 (formerly AutoGen)](https://github.com/ag2ai/ag2)**: Dynamic GroupChat, context-variable handoffs, and human-in-the-loop (`AI_ENGINE=ag2`)
 - JWT authentication with email verification
 - **[Agent 2 Agent (A2A) Protocol Support](https://developers.googleblog.com/en/a2a-a-new-era-of-agent-interoperability/)**: Interoperability between AI agents
 - **[Workflow Agent with LangGraph](https://www.langchain.com/langgraph)**: Building complex agent workflows

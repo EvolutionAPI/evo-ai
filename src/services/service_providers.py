@@ -36,9 +36,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src.services.crewai.session_service import CrewSessionService
+from src.services.ag2.session_service import AG2SessionService
 
 if os.getenv("AI_ENGINE") == "crewai":
     session_service = CrewSessionService(db_url=os.getenv("POSTGRES_CONNECTION_STRING"))
+elif os.getenv("AI_ENGINE") == "ag2":
+    session_service = AG2SessionService(db_url=os.getenv("POSTGRES_CONNECTION_STRING"))
 else:
     session_service = DatabaseSessionService(
         db_url=os.getenv("POSTGRES_CONNECTION_STRING")
