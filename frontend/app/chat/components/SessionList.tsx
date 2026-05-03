@@ -111,7 +111,7 @@ export function SessionList({
   };
 
   return (
-    <div className="w-64 border-r border-neutral-700 flex flex-col bg-neutral-900">
+    <div className="w-64 border-r border-neutral-700 flex flex-col bg-neutral-900 h-full">
       <div className="p-4 border-b border-neutral-700">
         <div className="flex items-center justify-between mb-4">
           <Button
