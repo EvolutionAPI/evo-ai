@@ -382,6 +382,77 @@ If you find EvoAI useful, please consider giving us a star! Your support helps u
 
 We welcome contributions from the community! Please read our [Contributing Guidelines](CONTRIBUTING.md) for more details.
 
+## FAQ
+
+### What is Evo AI?
+
+Evo AI is an open-source platform for creating and managing AI agents. It provides a comprehensive framework for agent development with integration support for multiple AI models (GPT-4, Claude, etc.), MCP servers, and the A2A protocol for agent interoperability.
+
+### Agent Types Available
+
+| Agent Type | Description | Use Case |
+|------------|-------------|----------|
+| **LLM Agent** | Language model-based agent with tools/MCP/sub-agents | General AI assistant |
+| **A2A Agent** | Implements Google A2A protocol for inter-agent communication | Multi-agent collaboration |
+| **Sequential Agent** | Executes sub-agents in order | Pipeline processing |
+| **Parallel Agent** | Executes sub-agents simultaneously | Concurrent tasks |
+| **Loop Agent** | Executes sub-agents with iteration limit | Iterative refinement |
+| **Workflow Agent** | Custom graph-based workflow via LangGraph | Complex multi-step workflows |
+| **Task Agent** | Structured task execution with target agent | Specific task automation |
+
+### Tech Stack Overview
+
+| Layer | Technologies |
+|-------|--------------|
+| **Backend** | FastAPI + SQLAlchemy + PostgreSQL + Alembic + Pydantic + Uvicorn + Redis + JWT + LangGraph |
+| **Frontend** | Next.js 15 + React 18 + TypeScript + Tailwind CSS + shadcn/ui + ReactFlow + React Query |
+| **Observability** | Langfuse integration via OpenTelemetry (OTel) |
+
+### Prerequisites Summary
+
+| Component | Requirements |
+|-----------|-------------|
+| **Backend** | Python 3.10+, PostgreSQL 13+, Redis 6+, Git, Make |
+| **Frontend** | Node.js 18+, pnpm (recommended) |
+| **Production** | Docker + Docker Compose |
+
+### Installation Methods
+
+| Method | Steps |
+|--------|-------|
+| **Manual Setup** | Clone → Backend venv + install-dev → Frontend install → Run both |
+| **Docker Compose** | Clone → `docker-compose up -d` → Access localhost:3000 |
+| **Docker Frontend Only** | Build frontend image → Run container → Connect to backend |
+
+### Langfuse Integration
+
+Evo AI natively supports Langfuse for tracing and observability:
+- Set LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY + OTEL_EXPORTER_OTLP_ENDPOINT in .env
+- View traces in Langfuse dashboard
+- OpenTelemetry (OTel) standard
+
+### A2A Protocol Support
+
+Evo AI implements Google's Agent 2 Agent (A2A) protocol for seamless agent interoperability:
+- Cross-agent communication
+- Task delegation between agents
+- Standardized protocol for multi-agent systems
+
+### Free Policy
+
+Evo AI is open-source and free under the Apache 2.0 License. Community contributions welcome via [Contributing Guidelines](CONTRIBUTING.md).
+
+### Help Resources
+
+| Resource | Link |
+|----------|------|
+| Official Docs | https://doc.evolution-api.com |
+| Discord Community | https://evolution-api.com/discord |
+| WhatsApp Group | https://evolution-api.com/whatsapp |
+| Postman Collection | https://evolution-api.com/postman |
+| GitHub Issues | https://github.com/EvolutionAPI/evo-ai/issues |
+| A2A Protocol Docs | https://google.github.io/A2A/ |
+
 ## 📄 License
 
 This project is licensed under the [Apache License 2.0](./LICENSE).
